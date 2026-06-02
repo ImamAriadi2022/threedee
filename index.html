@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Low Poly Truck Viewer</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&display=swap");
+
+      :root {
+        color-scheme: light;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Space Grotesk", sans-serif;
+        background: radial-gradient(1200px 800px at 10% 10%, #243341, #0b1117);
+      }
+
+      #ui {
+        position: absolute;
+        top: 16px;
+        left: 16px;
+        z-index: 10;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      #toggle-spin {
+        appearance: none;
+        border: 1px solid #5b7387;
+        background: linear-gradient(160deg, #e3f4ff, #b4d2e9);
+        color: #1b2b36;
+        font-weight: 600;
+        padding: 10px 14px;
+        border-radius: 10px;
+        cursor: pointer;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+      }
+
+      #toggle-spin:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+      }
+
+      #hint {
+        color: #dce6ee;
+        font-size: 12px;
+        opacity: 0.85;
+        background: rgba(12, 18, 24, 0.5);
+        padding: 8px 10px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      #loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #dce6ee;
+        font-size: 16px;
+        z-index: 20;
+        text-align: center;
+      }
+
+      #loading .spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid rgba(255,255,255,0.15);
+        border-top-color: #b4d2e9;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        margin: 0 auto 12px;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <button id="toggle-spin">Spin: ON</button>
+      <div id="hint">WASD / Arrow = Gerak, Klik = Scale, Hover = Highlight, Drag = Geser</div>
+    </div>
+
+    <div id="loading">
+      <div class="spinner"></div>
+      Memuat model...
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from 'three';
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+      import { DragControls } from 'three/addons/controls/DragControls.js';
+
+      console.log('Three.js berhasil dimuat, versi:', THREE.REVISION);
+
+      const loadingEl = document.getElementById('loading');
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b1117);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        200
+      );
+      camera.position.set(5, 3.4, 7);
+      camera.lookAt(0, 1, 0);
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.55);
+      scene.add(ambientLight);
+
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1.1);
+      dirLight.position.set(6, 10, 6);
+      dirLight.castShadow = true;
+      dirLight.shadow.mapSize.set(2048, 2048);
+      dirLight.shadow.camera.near = 0.5;
+      dirLight.shadow.camera.far = 50;
+      dirLight.shadow.camera.left = -12;
+      dirLight.shadow.camera.right = 12;
+      dirLight.shadow.camera.top = 12;
+      dirLight.shadow.camera.bottom = -12;
+      scene.add(dirLight);
+
+      const floor = new THREE.Mesh(
+        new THREE.PlaneGeometry(60, 60),
+        new THREE.MeshStandardMaterial({ color: 0x22303a, roughness: 0.9 })
+      );
+      floor.rotation.x = -Math.PI / 2;
+      floor.receiveShadow = true;
+      scene.add(floor);
+
+      const raycaster = new THREE.Raycaster();
+      const pointer = new THREE.Vector2();
+      const keys = new Set();
+      const materialState = new Map();
+
+      let truck = null;
+      let dragControls = null;
+      let isSpinning = true;
+      let isScaledUp = false;
+      let isHovering = false;
+      let isDragging = false;
+      let clickEligible = false;
+      let normalScale = new THREE.Vector3(1, 1, 1);
+
+      const moveSpeed = 3.0;
+      const spinSpeed = 0.9;
+      const clock = new THREE.Clock();
+
+      const toggleButton = document.getElementById("toggle-spin");
+      toggleButton.addEventListener("click", (e) => {
+        e.stopPropagation();
+        // Toggle animasi rotasi otomatis melalui tombol UI
+        isSpinning = !isSpinning;
+        toggleButton.textContent = isSpinning ? "Spin: ON" : "Spin: OFF";
+      });
+
+      window.addEventListener("keydown", (event) => {
+        // Simpan tombol yang ditekan untuk gerakan WASD/Arrow
+        keys.add(event.code);
+      });
+
+      window.addEventListener("keyup", (event) => {
+        // Hapus tombol saat dilepas agar gerak berhenti
+        keys.delete(event.code);
+      });
+
+      window.addEventListener("pointermove", (event) => {
+        // Update posisi pointer untuk kebutuhan raycasting hover
+        updatePointer(event);
+      });
+
+      window.addEventListener("pointerdown", (event) => {
+        // Tandai pointerdown agar klik hanya diproses jika bukan drag
+        updatePointer(event);
+        clickEligible = true;
+      });
+
+      window.addEventListener("pointerup", (event) => {
+        // Toggle scale hanya jika pointerdown tidak berubah menjadi drag
+        updatePointer(event);
+        if (clickEligible) {
+          handleClickToggleScale();
+        }
+        clickEligible = false;
+      });
+
+      // Muat model GLB
+      console.log('Memulai loading model GLB...');
+      const loader = new GLTFLoader();
+      loader.load(
+        "low-poly_truck_car_drifter.glb",
+        (gltf) => {
+          console.log('Model berhasil dimuat!', gltf);
+          truck = gltf.scene;
+
+          // Log info tentang model
+          let meshCount = 0;
+          truck.traverse((child) => {
+            if (child.isMesh) {
+              meshCount++;
+              child.castShadow = true;
+              child.receiveShadow = true;
+              cacheMaterial(child.material);
+            }
+          });
+          console.log('Jumlah mesh dalam model:', meshCount);
+
+          centerAndScale(truck);
+          normalScale.copy(truck.scale);
+          console.log('Truck position:', truck.position);
+          console.log('Truck scale:', truck.scale);
+          scene.add(truck);
+
+          setupDragControls();
+
+          // Sembunyikan loading indicator
+          if (loadingEl) loadingEl.style.display = 'none';
+        },
+        (progress) => {
+          if (progress.total > 0) {
+            const pct = Math.round((progress.loaded / progress.total) * 100);
+            console.log('Loading progress:', pct + '%');
+            if (loadingEl) loadingEl.querySelector('.spinner').style.borderTopColor = `hsl(${pct * 1.2}, 70%, 65%)`;
+          }
+        },
+        (error) => {
+          console.error("Gagal memuat model:", error);
+          if (loadingEl) loadingEl.textContent = 'Gagal memuat model: ' + error.message;
+        }
+      );
+
+      function updatePointer(event) {
+        const rect = renderer.domElement.getBoundingClientRect();
+        pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      }
+
+      function cacheMaterial(material) {
+        if (!material) {
+          return;
+        }
+
+        const materials = Array.isArray(material) ? material : [material];
+        materials.forEach((mat) => {
+          if (!mat || materialState.has(mat)) {
+            return;
+          }
+
+          materialState.set(mat, {
+            color: mat.color ? mat.color.clone() : null,
+            emissive: mat.emissive ? mat.emissive.clone() : null,
+            emissiveIntensity:
+              typeof mat.emissiveIntensity === "number"
+                ? mat.emissiveIntensity
+                : null,
+          });
+        });
+      }
+
+      function setHoverState(active) {
+        if (!truck) {
+          return;
+        }
+
+        truck.traverse((child) => {
+          if (!child.isMesh) {
+            return;
+          }
+
+          const materials = Array.isArray(child.material)
+            ? child.material
+            : [child.material];
+
+          materials.forEach((mat) => {
+            if (!mat) {
+              return;
+            }
+
+            const state = materialState.get(mat);
+            if (!state) {
+              return;
+            }
+
+            if (active) {
+              // Efek hover: ubah emissive atau warna material agar terlihat highlight
+              if (mat.emissive) {
+                mat.emissive.set(0x2a7cff);
+                if (typeof mat.emissiveIntensity === "number") {
+                  mat.emissiveIntensity = 0.7;
+                }
+              } else if (mat.color) {
+                mat.color.set(0x9fc7ff);
+              }
+            } else {
+              if (state.color && mat.color) {
+                mat.color.copy(state.color);
+              }
+              if (state.emissive && mat.emissive) {
+                mat.emissive.copy(state.emissive);
+              }
+              if (
+                state.emissiveIntensity !== null &&
+                typeof mat.emissiveIntensity === "number"
+              ) {
+                mat.emissiveIntensity = state.emissiveIntensity;
+              }
+            }
+          });
+        });
+      }
+
+      function updateHover() {
+        if (!truck || isDragging) {
+          return;
+        }
+
+        raycaster.setFromCamera(pointer, camera);
+        const hits = raycaster.intersectObject(truck, true);
+        const hoveringNow = hits.length > 0;
+
+        if (hoveringNow !== isHovering) {
+          // Efek hover: nyalakan/matikan highlight saat pointer masuk/keluar
+          setHoverState(hoveringNow);
+          isHovering = hoveringNow;
+        }
+      }
+
+      function handleClickToggleScale() {
+        if (!truck || isDragging) {
+          return;
+        }
+
+        raycaster.setFromCamera(pointer, camera);
+        const hits = raycaster.intersectObject(truck, true);
+        if (hits.length === 0) {
+          return;
+        }
+
+        // Klik pada truk untuk toggle skala besar/kembali normal
+        isScaledUp = !isScaledUp;
+        if (isScaledUp) {
+          truck.scale.copy(normalScale).multiplyScalar(1.2);
+        } else {
+          truck.scale.copy(normalScale);
+        }
+        setOnGround(truck);
+      }
+
+      function setupDragControls() {
+        // DragControls agar truk bisa digeser dengan klik-tahan
+        dragControls = new DragControls([truck], camera, renderer.domElement);
+        dragControls.transformGroup = true;
+
+        dragControls.addEventListener("dragstart", () => {
+          isDragging = true;
+          clickEligible = false;
+        });
+
+        dragControls.addEventListener("drag", () => {
+          setOnGround(truck);
+        });
+
+        dragControls.addEventListener("dragend", () => {
+          isDragging = false;
+          setOnGround(truck);
+        });
+      }
+
+      function centerAndScale(object3d) {
+        // Langkah 1: Hitung ukuran asli untuk menentukan scale
+        const box = new THREE.Box3().setFromObject(object3d);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+
+        console.log('Model bounding box size (asli):', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2));
+
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const targetSize = 3.0;
+        const scaleFactor = targetSize / maxDim;
+
+        // Langkah 2: Terapkan scale DULU
+        object3d.scale.setScalar(scaleFactor);
+
+        // Langkah 3: Hitung ulang bounding box SETELAH scale, lalu center
+        const scaledBox = new THREE.Box3().setFromObject(object3d);
+        const scaledCenter = new THREE.Vector3();
+        scaledBox.getCenter(scaledCenter);
+
+        object3d.position.sub(scaledCenter);
+
+        console.log('Scale factor:', scaleFactor.toFixed(4));
+        console.log('Model center (setelah scale):', scaledCenter.x.toFixed(2), scaledCenter.y.toFixed(2), scaledCenter.z.toFixed(2));
+
+        // Langkah 4: Letakkan di atas lantai
+        setOnGround(object3d);
+      }
+
+      function setOnGround(object3d) {
+        const box = new THREE.Box3().setFromObject(object3d);
+        object3d.position.y -= box.min.y;
+      }
+
+      function updateMovement(delta) {
+        if (!truck || isDragging) {
+          return;
+        }
+
+        const direction = new THREE.Vector3();
+
+        if (keys.has("KeyW") || keys.has("ArrowUp")) {
+          direction.z -= 1;
+        }
+        if (keys.has("KeyS") || keys.has("ArrowDown")) {
+          direction.z += 1;
+        }
+        if (keys.has("KeyA") || keys.has("ArrowLeft")) {
+          direction.x -= 1;
+        }
+        if (keys.has("KeyD") || keys.has("ArrowRight")) {
+          direction.x += 1;
+        }
+
+        if (direction.lengthSq() > 0) {
+          // Gerakkan truk sesuai input keyboard
+          direction.normalize();
+          truck.position.addScaledVector(direction, moveSpeed * delta);
+          setOnGround(truck);
+        }
+      }
+
+      function animate() {
+        requestAnimationFrame(animate);
+
+        const delta = clock.getDelta();
+
+        if (truck && isSpinning) {
+          truck.rotation.y += spinSpeed * delta;
+        }
+
+        updateMovement(delta);
+        updateHover();
+
+        renderer.render(scene, camera);
+      }
+      animate();
+      console.log('Animation loop dimulai');
+    </script>
+
+    <!-- Fallback: tampilkan error jika module gagal -->
+    <script>
+      window.addEventListener('error', function(e) {
+        console.error('Script error:', e.message, e.filename);
+      });
+      // Cek apakah module berhasil dimuat setelah 5 detik
+      setTimeout(function() {
+        var canvas = document.querySelector('canvas');
+        if (!canvas) {
+          var loadEl = document.getElementById('loading');
+          if (loadEl) {
+            loadEl.innerHTML = '<div style="color:#ff6b6b">Three.js gagal dimuat dari CDN.<br>Coba refresh halaman atau periksa koneksi internet.</div>';
+          }
+          console.error('Three.js module gagal dimuat. Canvas tidak ditemukan setelah 5 detik.');
+        }
+      }, 5000);
+    </script>
+  </body>
+</html>
